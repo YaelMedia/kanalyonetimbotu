@@ -7,24 +7,22 @@ from threading import Thread
 from flask import Flask
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatJoinRequest
+# HATA YAKALAMAK İÇİN ÖZEL KÜTÜPHANELERİ EKLEDİM 👇
+from pyrogram.errors import ChatWriteForbidden, ChatAdminRequired, RightForbidden
 
 # ==================== 1. AYARLAR ====================
-# Hata olmasın diye string olarak alıp int'e çevirmeyi deniyoruz
-try:
-    API_ID = int(os.environ.get("API_ID", 0))
-    API_HASH = os.environ.get("API_HASH", "")
-    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-    OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-except Exception as e:
-    print(f"❌ AYAR HATASI: Environment Variables okunamadı! {e}")
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 # ==================== 2. WEB SERVER ====================
-# Pyrogram loglarını AÇIK tutalım ki hatayı görelim
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "YaelManager V49 Active! 🟢"
+def home(): return "YaelManager V50 Active! 🟢"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -91,7 +89,8 @@ def check_user_access(user_id):
     conn = sqlite3.connect(DB_NAME)
     res = conn.cursor().execute("SELECT status, join_date FROM users WHERE user_id=?", (user_id,)).fetchone()
     if not res:
-        conn.cursor().execute("INSERT INTO users VALUES (?, 'FREE', ?)", (user_id, datetime.now().isoformat()))
+        now = datetime.now().isoformat()
+        conn.cursor().execute("INSERT INTO users VALUES (?, 'FREE', ?)", (user_id, now))
         conn.commit(); conn.close()
         return True, "🟢 Deneme (24 Saat)"
     status, join_str = res
@@ -108,7 +107,6 @@ def set_vip(user_id, is_vip):
 
 # ==================== 4. İSTEMCİ ====================
 init_db()
-print(f"Bot Token Kontrol: {BOT_TOKEN[:10]}...") # Tokenin ilk 10 hanesini loga basar (Doğru mu diye bak)
 bot = Client("manager_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 
 # ==================== 5. MENÜLER ====================
@@ -127,78 +125,129 @@ def setup_menu():
     return InlineKeyboardMarkup([[InlineKeyboardButton("Nasıl Yapılır?", callback_data="help_setup")]])
 def back_btn(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ana Menü", callback_data="main")]])
 
-# ==================== 6. KOMUTLAR ====================
+# ==================== 6. KURULUM VE UYARILAR ====================
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
     access, status = check_user_access(user_id)
+    
     if not access:
         await message.reply(f"⛔ **{status}**\nLütfen @yasin33 ile iletişime geçin.")
         return
+
     channel_id = get_user_channel(user_id)
+    
     if not channel_id:
-        await message.reply("⚠️ **Hoşgeldin!**\nÖnce yönetmek istediğin kanaldan bana bir mesaj ilet (forward yap).", reply_markup=setup_menu())
+        await message.reply(
+            "👋 **Kanal Yöneticisine Hoşgeldin!**\n\n"
+            "🚨 **ÖNEMLİ UYARI (OKU!):**\n"
+            "Bu botun çalışması için yönetmek istediğin kanalda **YÖNETİCİ (ADMIN)** olması gerekir.\n"
+            "Özellikle **'Mesaj Gönderme'** yetkisini vermezsen Flash ve Post çalışmaz!\n\n"
+            "👇 **KURULUM:**\n"
+            "1. Botu kanalına ekle ve Yönetici yap.\n"
+            "2. Kanalından herhangi bir mesajı bana ilet (forward yap).",
+            reply_markup=setup_menu()
+        )
     else:
-        await message.reply(f"👋 **Panel Hazır!**\n📺 Bağlı Kanal: `{channel_id}`", reply_markup=main_menu())
+        await message.reply(f"👋 **Panel Hazır!**\n📺 Bağlı Kanal: `{channel_id}`\nℹ️ {status}", reply_markup=main_menu())
 
 @bot.on_message(filters.forwarded & filters.private)
 async def channel_setup(client, message):
     if not message.forward_from_chat:
-        await message.reply("❌ **Hata:** Kanal mesajı değil veya kanal gizli.")
+        await message.reply("❌ **Hata:** Bu bir kanal mesajı değil. Kanaldan iletmen lazım.")
         return
+    
     chat_id = message.forward_from_chat.id
     title = message.forward_from_chat.title
+    
+    # KANAL TİPİ KONTROLÜ (Sadece kanallar ve gruplar)
+    if message.forward_from_chat.type not in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP, enums.ChatType.GROUP]:
+        await message.reply("❌ Sadece Kanal veya Grup bağlayabilirsin.")
+        return
+
     set_user_channel(message.from_user.id, chat_id)
-    await message.reply(f"✅ **Kanal Bağlandı:** {title} (`{chat_id}`)", reply_markup=main_menu())
+    
+    await message.reply(
+        f"✅ **KANAL BAĞLANDI!**\n\n"
+        f"📺 **İsim:** {title}\n"
+        f"🆔 **ID:** `{chat_id}`\n\n"
+        f"🚨 **SON KONTROL:**\n"
+        f"Botu bu kanalda **YÖNETİCİ** yaptın mı? Yapmadıysan komutlar çalışmaz!",
+        reply_markup=main_menu()
+    )
 
-# --- Callback Handler ---
-@bot.on_callback_query()
-async def cb_handler(client, cb):
-    if cb.data == "main": await cb.message.edit_text("👋 **Ana Menü**", reply_markup=main_menu())
-    elif cb.data == "change_channel": await cb.message.edit_text("🔄 Yeni kanaldan mesaj ilet.", reply_markup=back_btn())
-    elif cb.data == "help_setup": await cb.answer("Mesajı seç -> İlet -> Botu seç", show_alert=True)
-    elif cb.data == "info_flash": await cb.message.edit_text("💣 Yanıtla -> `/flash 30`", reply_markup=back_btn())
-    elif cb.data == "info_schedule": await cb.message.edit_text("⏳ Yanıtla -> `/zamanla 1h`", reply_markup=back_btn())
-    elif cb.data == "info_buton": await cb.message.edit_text("🔘 Yanıtla -> `/buton İsim | Link`", reply_markup=back_btn())
-    elif cb.data == "info_post": await cb.message.edit_text("📢 Yanıtla -> `/post`", reply_markup=back_btn())
-    elif cb.data == "info_approve": await cb.message.edit_text("🔐 `/otoonay ac` yaz.", reply_markup=back_btn())
-    elif cb.data == "info_account": 
-        _, status = check_user_access(cb.from_user.id)
-        await cb.message.edit_text(f"📊 Durum: {status}", reply_markup=back_btn())
+# --- İŞLEVLER (HATA YAKALAYICILI) ---
 
-# --- İşlevler ---
 async def pre_check(client, message):
     uid = message.from_user.id
     acc, _ = check_user_access(uid)
     if not acc: await message.reply("⛔ Süre Doldu"); return None
     cid = get_user_channel(uid)
-    if not cid: await message.reply("⚠️ Önce kanal bağla (mesaj ilet)."); return None
+    if not cid: await message.reply("⚠️ Önce kanal bağla."); return None
     return int(cid)
 
-@bot.on_message(filters.command("otoonay") & filters.private)
-async def set_approve(c, m):
-    if not await pre_check(c, m): return
-    try:
-        if m.command[1] == "ac": set_approve_status(m.from_user.id, 1); await m.reply("✅ Açıldı")
-        else: set_approve_status(m.from_user.id, 0); await m.reply("❌ Kapatıldı")
-    except: await m.reply("`/otoonay ac`")
-
 @bot.on_message(filters.command("flash") & filters.private)
-async def flash(c, m):
-    cid = await pre_check(c, m)
-    if not cid or not m.reply_to_message: return
+async def flash(client, message):
+    cid = await pre_check(client, message)
+    if not cid: return
+    if not message.reply_to_message:
+        await message.reply("⚠️ **Kullanım Hatası!**\nBir fotoğrafa veya yazıya **yanıt vererek** `/flash 5` yazmalısın."); return
+
     try:
-        raw = m.command[1]
+        raw = message.command[1]
         sec = int(raw.replace("m", "")) * 60 if "m" in raw else int(raw)
-        sent = await m.reply_to_message.copy(cid)
-        alrt = await c.send_message(cid, f"⏳ {raw} sonra silinecek!", reply_to_message_id=sent.id)
-        await m.reply("✅")
+        
+        # Kanala Kopyala
+        sent = await message.reply_to_message.copy(cid)
+        
+        # Bilgi Mesajı
+        alrt = await client.send_message(cid, f"⏳ **Bu mesaj {raw} sonra silinecek!**", reply_to_message_id=sent.id)
+        
+        await message.reply(f"✅ **Başarılı!** Mesaj {raw} sonra silinecek.")
+        
         await asyncio.sleep(sec)
         try: await sent.delete(); await alrt.delete()
         except: pass
-    except: await m.reply("❌ Hata")
 
+    # ÖZEL HATA YAKALAMA (KULLANICIYA LAF ANLATMA KISMI)
+    except (ChatWriteForbidden, ChatAdminRequired):
+        await message.reply(
+            "❌ **YETKİ HATASI!**\n\n"
+            "Ben o kanalda **Yönetici (Admin)** değilim veya **Mesaj Gönderme** iznim yok.\n"
+            "Lütfen kanal ayarlarına girip beni Yönetici yap!"
+        )
+    except IndexError:
+        await message.reply("❌ **Süre Girmedin!**\nÖrnek: `/flash 30`")
+    except Exception as e:
+        await message.reply(f"❌ Beklenmedik Hata: {e}")
+
+@bot.on_message(filters.command("post") & filters.private)
+async def post(client, message):
+    cid = await pre_check(client, message)
+    if not cid or not message.reply_to_message: return
+    try:
+        await message.reply_to_message.copy(cid)
+        await message.reply("✅ **Gönderildi!**")
+    except (ChatWriteForbidden, ChatAdminRequired):
+        await message.reply("❌ **YETKİ YOK!** Botu kanala Admin yap.")
+    except Exception as e:
+        await message.reply(f"❌ Hata: {e}")
+
+@bot.on_message(filters.command("buton") & filters.private)
+async def buton(client, message):
+    cid = await pre_check(client, message)
+    if not cid or not message.reply_to_message: return
+    try:
+        nm, ur = message.text.split(None, 1)[1].split("|")
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton(nm.strip(), url=ur.strip())]])
+        await message.reply_to_message.copy(cid, reply_markup=btn)
+        await message.reply("✅")
+    except (ChatWriteForbidden, ChatAdminRequired):
+        await message.reply("❌ **YETKİ YOK!** Botu kanala Admin yap.")
+    except: await message.reply("⚠️ Hata! Format: `/buton İsim | Link`")
+
+# --- ZAMANLAYICI & OTO ONAY (AYNI) ---
 @bot.on_message(filters.command("zamanla") & filters.private)
 async def schedule(c, m):
     cid = await pre_check(c, m)
@@ -207,25 +256,7 @@ async def schedule(c, m):
         raw = m.command[1]
         d = int(raw.replace("h", "")) * 3600 if "h" in raw else int(raw.replace("m", "")) * 60
         add_schedule(m.from_user.id, cid, m.reply_to_message.id, datetime.now()+timedelta(seconds=d))
-        await m.reply(f"✅ {raw} sonra.")
-    except: await m.reply("❌ Hata")
-
-@bot.on_message(filters.command("buton") & filters.private)
-async def buton(c, m):
-    cid = await pre_check(c, m)
-    if not cid or not m.reply_to_message: return
-    try:
-        nm, ur = m.text.split(None, 1)[1].split("|")
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton(nm.strip(), url=ur.strip())]])
-        await m.reply_to_message.copy(cid, reply_markup=btn)
-        await m.reply("✅")
-    except: await m.reply("`/buton Ad | Link`")
-
-@bot.on_message(filters.command("post") & filters.private)
-async def post(c, m):
-    cid = await pre_check(c, m)
-    if not cid or not m.reply_to_message: return
-    try: await m.reply_to_message.copy(cid); await m.reply("✅")
+        await m.reply(f"✅ **Planlandı!** {raw} sonra paylaşılacak.")
     except: await m.reply("❌ Hata")
 
 @bot.on_chat_join_request()
@@ -235,12 +266,38 @@ async def auto_approve_handler(client, req: ChatJoinRequest):
         try: await client.approve_chat_join_request(req.chat.id, req.from_user.id)
         except: pass
 
+@bot.on_message(filters.command("otoonay") & filters.private)
+async def set_approve(c, m):
+    if not await pre_check(c, m): return
+    try:
+        if m.command[1] == "ac": set_approve_status(m.from_user.id, 1); await m.reply("✅ Açıldı")
+        else: set_approve_status(m.from_user.id, 0); await m.reply("❌ Kapatıldı")
+    except: await m.reply("`/otoonay ac`")
+
+# --- MENÜ CALLBACKS ---
+@bot.on_callback_query()
+async def cb_handler(client, cb):
+    if cb.data == "main": await cb.message.edit_text("👋 **Ana Menü**", reply_markup=main_menu())
+    elif cb.data == "change_channel": await cb.message.edit_text("🔄 Kanaldan mesaj ilet.", reply_markup=back_btn())
+    elif cb.data == "help_setup": await cb.answer("Kanal > Mesaj Seç > İlet > Bot", show_alert=True)
+    elif cb.data == "info_flash": await cb.message.edit_text("💣 Yanıtla -> `/flash 30`\n⚠️ Bot Admin olmalı!", reply_markup=back_btn())
+    elif cb.data == "info_schedule": await cb.message.edit_text("⏳ Yanıtla -> `/zamanla 1h`", reply_markup=back_btn())
+    elif cb.data == "info_buton": await cb.message.edit_text("🔘 Yanıtla -> `/buton İsim | Link`", reply_markup=back_btn())
+    elif cb.data == "info_post": await cb.message.edit_text("📢 Yanıtla -> `/post`\n⚠️ Bot Admin olmalı!", reply_markup=back_btn())
+    elif cb.data == "info_approve": await cb.message.edit_text("🔐 `/otoonay ac` yaz.\n⚠️ Kanalda 'İstekle Katıl' açık olmalı.", reply_markup=back_btn())
+    elif cb.data == "info_account": 
+        _, status = check_user_access(cb.from_user.id)
+        await cb.message.edit_text(f"📊 {status}\n🛒 @yasin33", reply_markup=back_btn())
+
+# --- ADMİN ---
 @bot.on_message(filters.command("addvip") & filters.user(OWNER_ID))
 async def addvip(c, m): set_vip(int(m.command[1]), True); await m.reply("OK")
+@bot.on_message(filters.command("delvip") & filters.user(OWNER_ID))
+async def delvip(c, m): set_vip(int(m.command[1]), False); await m.reply("OK")
 
-# ==================== BAŞLATMA ====================
+# --- BAŞLATMA ---
+from pyrogram import enums # ChatType için gerekli
 async def scheduler_task():
-    print("⏳ Zamanlayıcı...")
     while True:
         await asyncio.sleep(60)
         try:
@@ -252,21 +309,13 @@ async def scheduler_task():
         except: pass
 
 async def main():
-    print("🚀 Bot Başlatılıyor...")
-    keep_alive() # Web server başlat
-    
-    try:
-        await bot.start()
-        print(f"✅ TELEGRAM BAĞLANTISI BAŞARILI! Bot: @{(await bot.get_me()).username}")
-    except Exception as e:
-        print(f"🚨🚨 KRİTİK HATA: BOT BAĞLANAMADI! SEBEP: {e}")
-        print("LÜTFEN RENDER ENVIRONMENT VARIABLES KISMINDAKI 'BOT_TOKEN' ve 'API_ID' DEĞERLERİNİ KONTROL ET!")
-        return
-
+    print("Bot Başladı...")
+    await bot.start()
     asyncio.create_task(scheduler_task())
     await idle()
     await bot.stop()
 
 if __name__ == '__main__':
+    keep_alive()
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
