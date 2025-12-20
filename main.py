@@ -20,7 +20,7 @@ logging.getLogger("pyrogram").setLevel(logging.WARNING)
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "YaelManager V47 (Multi-User) Active! 🟢"
+def home(): return "YaelManager V48 (Strict Setup) Active! 🟢"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -31,36 +31,21 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# ==================== 3. VERİTABANI (YENİ YAPILANDIRMA) ====================
+# ==================== 3. VERİTABANI ====================
 DB_NAME = "bot_data.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Kullanıcı Lisansları (Aynı)
     c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT, join_date TEXT)''')
-    
-    # --- YENİ TABLO: KULLANICI AYARLARI ---
-    # Her kullanıcının kanalı, oto onay durumu ve hoşgeldin mesajı kendine özeldir.
-    c.execute('''CREATE TABLE IF NOT EXISTS user_settings 
-                 (user_id INTEGER PRIMARY KEY, 
-                  channel_id INTEGER, 
-                  auto_approve INTEGER DEFAULT 0, 
-                  welcome_msg TEXT)''')
-                  
-    # Zamanlayıcı Kuyruğu (Aynı)
-    c.execute('''CREATE TABLE IF NOT EXISTS scheduled_posts 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  user_id INTEGER, channel_id INTEGER, 
-                  message_id INTEGER, run_time TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER PRIMARY KEY, channel_id INTEGER, auto_approve INTEGER DEFAULT 0, welcome_msg TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS scheduled_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id INTEGER, message_id INTEGER, run_time TEXT)''')
     conn.commit()
     conn.close()
 
-# --- AYAR FONKSİYONLARI (KİŞİYE ÖZEL) ---
-
+# --- DB FONKSİYONLARI ---
 def set_user_channel(user_id, channel_id):
     with sqlite3.connect(DB_NAME) as conn:
-        # Önce kayıt var mı bak, yoksa oluştur
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
         cursor.execute("UPDATE user_settings SET channel_id=? WHERE user_id=?", (channel_id, user_id))
@@ -70,30 +55,20 @@ def get_user_channel(user_id):
         res = conn.cursor().execute("SELECT channel_id FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
     return res[0] if res else None
 
-def set_approve_status(user_id, status): # 1 veya 0
+def set_approve_status(user_id, status):
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
         cursor.execute("UPDATE user_settings SET auto_approve=? WHERE user_id=?", (status, user_id))
 
-def set_welcome_msg(user_id, msg):
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
-        cursor.execute("UPDATE user_settings SET welcome_msg=? WHERE user_id=?", (msg, user_id))
-
-# --- OTO ONAY İÇİN KANAL SAHİBİNİ BULMA ---
 def get_settings_by_channel(channel_id):
     with sqlite3.connect(DB_NAME) as conn:
-        # Bu kanal ID'si hangi ayar satırında geçiyor?
         res = conn.cursor().execute("SELECT auto_approve, welcome_msg FROM user_settings WHERE channel_id=?", (channel_id,)).fetchone()
     return res if res else (0, None)
 
-# --- ZAMANLAYICI & LİSANS (AYNI) ---
 def add_schedule(user_id, channel_id, message_id, run_time):
     with sqlite3.connect(DB_NAME) as conn:
-        conn.cursor().execute("INSERT INTO scheduled_posts (user_id, channel_id, message_id, run_time) VALUES (?, ?, ?, ?)", 
-                              (user_id, channel_id, message_id, run_time.isoformat()))
+        conn.cursor().execute("INSERT INTO scheduled_posts (user_id, channel_id, message_id, run_time) VALUES (?, ?, ?, ?)", (user_id, channel_id, message_id, run_time.isoformat()))
 
 def get_due_posts():
     posts = []
@@ -140,76 +115,134 @@ def main_menu():
          InlineKeyboardButton("📢 Direkt Post", callback_data="info_post")],
         [InlineKeyboardButton("🔐 Oto Onay", callback_data="info_approve"),
          InlineKeyboardButton("👤 Hesabım", callback_data="info_account")],
-        [InlineKeyboardButton("🛠 Geliştirici: @yasin33", url="https://t.me/yasin33")]
+        [InlineKeyboardButton("⚙️ KANAL DEĞİŞTİR", callback_data="change_channel")]
+    ])
+
+def setup_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Nasıl Yapılır?", callback_data="help_setup")]
     ])
 
 def back_btn(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ana Menü", callback_data="main")]])
 
-# ==================== 6. KOMUTLAR ====================
+# ==================== 6. KURULUM MANTIĞI (EN ÖNEMLİ KISIM) ====================
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
-    _, status = check_user_access(message.from_user.id)
-    await message.reply(f"👋 **Kanal Yönetim Asistanı**\nℹ️ Durum: {status}", reply_markup=main_menu())
+    user_id = message.from_user.id
+    access, status = check_user_access(user_id)
+    
+    # 1. Erişim Kontrolü
+    if not access:
+        await message.reply(f"⛔ **{status}**\nLütfen @yasin33 ile iletişime geçin.")
+        return
+
+    # 2. Kanal Tanımlı mı?
+    channel_id = get_user_channel(user_id)
+    
+    if not channel_id:
+        # KANAL YOKSA ZORUNLU KURULUM EKRANI
+        await message.reply(
+            "👋 **Kanal Yöneticisine Hoşgeldin!**\n\n"
+            "⚠️ **DİKKAT:** Henüz bir kanal bağlamadın.\n"
+            "Botu kullanmak için önce hangi kanalı yöneteceğini bilmem lazım.\n\n"
+            "👇 **Lütfen yönetmek istediğin kanaldan bana bir mesaj ilet (forward yap).**",
+            reply_markup=setup_menu()
+        )
+    else:
+        # KANAL VARSA ANA MENÜ
+        await message.reply(f"👋 **Panel Hazır!**\n\n📺 **Bağlı Kanal:** `{channel_id}`\nℹ️ **Durum:** {status}", reply_markup=main_menu())
+
+# --- KANAL BAĞLAMA (FORWARD İLE) ---
+@bot.on_message(filters.forwarded & filters.private)
+async def channel_setup(client, message):
+    if not message.forward_from_chat:
+        await message.reply("❌ **Hata:** Bu bir kanal mesajı değil veya kanal gizli. Lütfen botu kanala ekleyip tekrar dene.")
+        return
+    
+    chat_id = message.forward_from_chat.id
+    title = message.forward_from_chat.title
+    user_id = message.from_user.id
+    
+    # Veritabanına Kaydet
+    set_user_channel(user_id, chat_id)
+    
+    await message.reply(
+        f"✅ **KURULUM BAŞARILI!**\n\n"
+        f"📺 **Kanal:** {title}\n"
+        f"🆔 **ID:** `{chat_id}`\n\n"
+        f"Artık tüm komutların bu kanalda çalışacak.",
+        reply_markup=main_menu()
+    )
+
+# ==================== 7. KOMUTLAR (KANAL KONTROLLÜ) ====================
+
+# Yardımcı Fonksiyon: Kanal bağlı mı kontrol eder
+async def ensure_channel(client, message):
+    channel_id = get_user_channel(message.from_user.id)
+    if not channel_id:
+        await message.reply("⛔ **Önce Kanal Bağla!**\nYönetmek istediğin kanaldan bir mesajı bana ilet.")
+        return None
+    return int(channel_id)
 
 @bot.on_callback_query()
 async def cb_handler(client, cb):
-    if cb.data == "main": await cb.message.edit_text("👋 **Ana Menü**", reply_markup=main_menu())
+    if cb.data == "main":
+        await cb.message.edit_text("👋 **Ana Menü**", reply_markup=main_menu())
+    elif cb.data == "change_channel":
+        await cb.message.edit_text("🔄 **Kanal Değiştirme**\n\nYeni kanaldan bir mesajı bana iletmen yeterli.", reply_markup=back_btn())
+    elif cb.data == "help_setup":
+        await cb.answer("Kanalına git -> Bir mesajı seç -> İlet -> Botu seç -> Gönder", show_alert=True)
+    # Diğer menüler aynı... (info_flash, info_buton vb.)
     elif cb.data == "info_flash": await cb.message.edit_text("💣 **Süreli Mesaj:**\nYanıtla -> `/flash 30`", reply_markup=back_btn())
     elif cb.data == "info_schedule": await cb.message.edit_text("⏳ **Zamanlayıcı:**\nYanıtla -> `/zamanla 1h`", reply_markup=back_btn())
     elif cb.data == "info_buton": await cb.message.edit_text("🔘 **Butonlu Post:**\nYanıtla -> `/buton İsim | Link`", reply_markup=back_btn())
     elif cb.data == "info_post": await cb.message.edit_text("📢 **Direkt Post:**\nYanıtla -> `/post`", reply_markup=back_btn())
-    elif cb.data == "info_approve": await cb.message.edit_text("🔐 **Oto Onay:**\n`/otoonay ac` yaz, istekleri kabul edeyim.", reply_markup=back_btn())
-    elif cb.data == "info_account":
-        uid = cb.from_user.id
-        _, status = check_user_access(uid)
-        await cb.message.edit_text(f"👤 ID: `{uid}`\n📊 Lisans: {status}\n🛒 Satın Al: @yasin33", reply_markup=back_btn())
+    elif cb.data == "info_approve": await cb.message.edit_text("🔐 **Oto Onay:**\n`/otoonay ac` yazarsan istekleri onaylarım.", reply_markup=back_btn())
+    elif cb.data == "info_account": 
+        access, status = check_user_access(cb.from_user.id)
+        await cb.message.edit_text(f"📊 Durum: {status}\n🛒 Satın Al: @yasin33", reply_markup=back_btn())
 
-# --- Ön Kontrol (Kanal & Lisans) ---
-async def pre_check(client, message):
-    user_id = message.from_user.id
-    access, _ = check_user_access(user_id)
-    if not access: await message.reply("⛔ **Süreniz Doldu!**\nDevam etmek için: @yasin33"); return None
-    
-    # ARTIK HERKESİN KENDİ KANALINI ÇEKİYORUZ
-    channel_id = get_user_channel(user_id)
-    
-    if not channel_id: await message.reply("⚠️ **Kanal Ayarlanmamış!**\nAdmin olduğun kanaldan bir mesajı bana ilet ve yanıt olarak `/setchannel` yaz."); return None
-    return int(channel_id)
+# --- İŞLEVLER ---
 
-# --- 1. SÜRELİ MESAJ ---
+@bot.on_message(filters.command("otoonay") & filters.private)
+async def set_approve(c, m):
+    if not await ensure_channel(c, m): return
+    try:
+        if m.command[1] == "ac": set_approve_status(m.from_user.id, 1); await m.reply("✅ Oto-Onay Açıldı!")
+        else: set_approve_status(m.from_user.id, 0); await m.reply("❌ Kapatıldı.")
+    except: await m.reply("⚠️ Kullanım: `/otoonay ac`")
+
 @bot.on_message(filters.command("flash") & filters.private)
 async def flash(client, message):
-    cid = await pre_check(client, message)
+    cid = await ensure_channel(client, message)
     if not cid or not message.reply_to_message: return
     try:
         raw = message.command[1]
         sec = int(raw.replace("m", "")) * 60 if "m" in raw else int(raw)
         sent = await message.reply_to_message.copy(cid)
         alert = await client.send_message(cid, f"⏳ {raw} sonra silinecek!", reply_to_message_id=sent.id)
-        await message.reply(f"✅ {raw} ayarlandı.")
+        await message.reply(f"✅ Ayarlandı.")
         await asyncio.sleep(sec)
         try: await sent.delete(); await alert.delete()
         except: pass
     except: await message.reply("❌ Hata: `/flash 30`")
 
-# --- 2. ZAMANLAYICI ---
 @bot.on_message(filters.command("zamanla") & filters.private)
 async def schedule(client, message):
-    cid = await pre_check(client, message)
+    cid = await ensure_channel(client, message)
     if not cid or not message.reply_to_message: return
     try:
         raw = message.command[1]
         delay = int(raw.replace("h", "")) * 3600 if "h" in raw else int(raw.replace("m", "")) * 60
         run_time = datetime.now() + timedelta(seconds=delay)
         add_schedule(message.from_user.id, cid, message.reply_to_message.id, run_time)
-        await message.reply(f"✅ **Planlandı!** {raw} sonra paylaşılacak.")
-    except: await message.reply("❌ Hata: `/zamanla 1h`")
+        await message.reply(f"✅ Planlandı: {raw} sonra.")
+    except: await message.reply("❌ Hata")
 
-# --- 3. BUTONLU POST ---
 @bot.on_message(filters.command("buton") & filters.private)
 async def buton(client, message):
-    cid = await pre_check(client, message)
+    cid = await ensure_channel(client, message)
     if not cid or not message.reply_to_message: return
     try:
         name, url = message.text.split(None, 1)[1].split("|")
@@ -218,64 +251,28 @@ async def buton(client, message):
         await message.reply("✅")
     except: await message.reply("⚠️ Hata: `/buton İsim | Link`")
 
-# --- 4. DİREKT POST ---
 @bot.on_message(filters.command("post") & filters.private)
 async def post(client, message):
-    cid = await pre_check(client, message)
+    cid = await ensure_channel(client, message)
     if not cid or not message.reply_to_message: return
     try: await message.reply_to_message.copy(cid); await message.reply("✅")
     except: await message.reply("❌ Hata")
 
-# --- 5. OTO ONAY (GÜNCELLENDİ: ÇOKLU KANAL DESTEĞİ) ---
+# --- OTO ONAY EVENT ---
 @bot.on_chat_join_request()
 async def auto_approve_handler(client, req: ChatJoinRequest):
-    # İstek gelen kanalın veritabanındaki ayarını bul
-    auto_approve, welcome_msg = get_settings_by_channel(req.chat.id)
-    
-    if auto_approve == 1:
+    settings = get_settings_by_channel(req.chat.id) # (auto_approve, welcome_msg)
+    if settings and settings[0] == 1:
         try:
             await client.approve_chat_join_request(req.chat.id, req.from_user.id)
-            if welcome_msg: await client.send_message(req.from_user.id, welcome_msg)
         except: pass
 
-# --- KİŞİSEL AYARLAR ---
-@bot.on_message(filters.command("otoonay") & filters.private)
-async def set_approve(c, m):
-    user_id = m.from_user.id
-    access, _ = check_user_access(user_id)
-    if not access: await m.reply("⛔ Süre Doldu"); return
-
-    try:
-        if m.command[1] == "ac": set_approve_status(user_id, 1); await m.reply("✅ Açıldı")
-        else: set_approve_status(user_id, 0); await m.reply("❌ Kapatıldı")
-    except: await m.reply("`/otoonay ac` veya `kapat`")
-
-@bot.on_message(filters.command("hosgeldin") & filters.private)
-async def set_welcome(c, m):
-    user_id = m.from_user.id
-    access, _ = check_user_access(user_id)
-    if not access: await m.reply("⛔ Süre Doldu"); return
-
-    try: set_welcome_msg(user_id, m.text.split(None, 1)[1]); await m.reply("✅ Ayarlandı")
-    except: await m.reply("`/hosgeldin Mesaj...`")
-
-@bot.on_message(filters.command("setchannel") & filters.private)
-async def set_channel(c, m):
-    if m.reply_to_message and m.reply_to_message.forward_from_chat:
-        set_user_channel(m.from_user.id, m.reply_to_message.forward_from_chat.id)
-        await m.reply("✅ **Bu Kanal Sizin Hesabınıza Tanımlandı.**\nArtık komutlarınız buraya işleyecek.")
-    else: await m.reply("⚠️ Kanaldan mesaj ilet.")
-
-# --- ADMİN PANEL ---
+# --- ADMİN KOMUTLARI ---
 @bot.on_message(filters.command("addvip") & filters.user(OWNER_ID))
-async def addvip(c, m): 
-    try: set_vip(int(m.command[1]), True); await m.reply("✅ VIP Verildi")
-    except: pass
+async def addvip(c, m): set_vip(int(m.command[1]), True); await m.reply("OK")
 
 @bot.on_message(filters.command("delvip") & filters.user(OWNER_ID))
-async def delvip(c, m): 
-    try: set_vip(int(m.command[1]), False); await m.reply("❌ FREE Yapıldı")
-    except: pass
+async def delvip(c, m): set_vip(int(m.command[1]), False); await m.reply("OK")
 
 # ==================== BAŞLATMA ====================
 async def scheduler_task():
@@ -285,17 +282,15 @@ async def scheduler_task():
         try:
             posts = get_due_posts()
             if posts:
-                for post in posts: # post: id, uid, cid, mid, time
-                    try:
-                        await bot.copy_message(chat_id=post[2], from_chat_id=post[1], message_id=post[3])
-                        await bot.send_message(post[1], "🚀 Zamanlı post paylaşıldı!")
+                for post in posts:
+                    try: await bot.copy_message(chat_id=post[2], from_chat_id=post[1], message_id=post[3])
                     except: pass
         except: pass
 
 async def main():
     print("Bot Başlıyor...")
     await bot.start()
-    asyncio.create_task(scheduler_task()) 
+    asyncio.create_task(scheduler_task())
     await idle()
     await bot.stop()
 
