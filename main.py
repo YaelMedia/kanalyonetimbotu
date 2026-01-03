@@ -1,9 +1,36 @@
 import os
 import asyncio
+import logging
 import sqlite3
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, UserPrivacyRestricted, UserNotMutualContact, PeerFlood, UserAlreadyParticipant
+import re
+from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask # <--- İŞTE BU EKSİKTİ
+from pyrogram import Client, filters, idle, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import (
+    UserAlreadyParticipant, InviteHashExpired, ChannelPrivate, 
+    PeerIdInvalid, FloodWait, UsernameInvalid, ChannelInvalid
+)
 
+# ==================== 1. WEB SERVER (RENDER İÇİN ŞART!) ====================
+# Render'ın "Port yok" hatasını çözen kısım burası.
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot Aktif ve Çalışıyor! 🟢"
+
+def run_web():
+    # Render'ın verdiği portu dinle, yoksa 8080
+    port = int(os.environ.get("PORT", 8080))
+    # 0.0.0.0 ÇOK ÖNEMLİ!
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
 # --- AYARLAR ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -158,6 +185,25 @@ async def harvest_members(client, message):
 
     await status.edit(f"🏁 **HASAT BİTTİ!**\nToplam {total_added} üye havuza çekildi.")
 
+# ==================== 11. BAŞLATMA ====================
+async def main():
+    print("Sistem Başlatılıyor...")
+    
+    # 👇👇 BU SATIRI EKLEMEZSEN YİNE HATA VERİR 👇👇
+    keep_alive() 
+    # 👆👆 SİHİRLİ KOMUT BU 👆👆
+
+    await bot.start()
+    for i, ub in enumerate(USERBOTS):
+        try: await ub.start(); print(f"✅ Bot {i+1} Aktif!")
+        except Exception as e: print(f"⚠️ Bot {i+1} Hata: {e}")
+    await idle()
+    await bot.stop()
+    for ub in USERBOTS:
+        try: await ub.stop()
+        except: pass
+
 if __name__ == '__main__':
-    print("Havuz Botu Aktif...")
-    app.run()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
+
